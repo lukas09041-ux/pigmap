@@ -8,10 +8,14 @@ declare global {
   namespace kakao.maps {
     class LatLng {
       constructor(lat: number, lng: number);
+      getLat(): number;
+      getLng(): number;
     }
 
     class LatLngBounds {
       extend(latlng: LatLng): void;
+      getSouthWest(): LatLng;
+      getNorthEast(): LatLng;
     }
 
     class Map {
@@ -19,6 +23,8 @@ declare global {
       setBounds(bounds: LatLngBounds): void;
       setCenter(latlng: LatLng): void;
       setLevel(level: number): void;
+      getLevel(): number;
+      getBounds(): LatLngBounds;
     }
 
     class CustomOverlay {
@@ -30,6 +36,11 @@ declare global {
         zIndex?: number;
       });
       setMap(map: Map | null): void;
+    }
+
+    namespace event {
+      function addListener(target: unknown, type: string, handler: () => void): void;
+      function removeListener(target: unknown, type: string, handler: () => void): void;
     }
 
     function load(callback: () => void): void;

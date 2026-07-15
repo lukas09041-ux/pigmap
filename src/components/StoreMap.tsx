@@ -3,57 +3,154 @@
 import Script from "next/script";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { getPigStage } from "@/lib/pig-stage";
-import { DEFAULT_MAP_CENTER } from "@/lib/constants";
-import type { Store } from "@/types/store";
+import { DEFAULT_MAP_CENTER, FOOD_CATEGORIES } from "@/lib/constants";
 import JommechuSheet from "./JommechuSheet";
 
 const KAKAO_JS_KEY = process.env.NEXT_PUBLIC_KAKAO_JS_KEY;
+
+// 전국 1.2만 가게를 전부 그리면 모바일이 버티지 못하므로,
+// 지도가 멈출 때(idle)마다 화면 영역 안의 가게만 불러와 그린다.
+const MAX_VISIBLE_MARKERS = 250;
+
+type MapStore = {
+  id: string;
+  name: string;
+  category: string | null;
+  latitude: number;
+  longitude: number;
+  pig_temperature: number;
+};
 
 export default function StoreMap() {
   const router = useRouter();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<kakao.maps.Map | null>(null);
   const overlaysRef = useRef<kakao.maps.CustomOverlay[]>([]);
+  const fetchNonceRef = useRef(0);
+  const foodOnlyRef = useRef(false);
 
   const [sdkReady, setSdkReady] = useState(false);
-  const [stores, setStores] = useState<Store[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const [fetchNonce, setFetchNonce] = useState(0);
+  const [foodOnly, setFoodOnly] = useState(false);
   const [locating, setLocating] = useState(false);
   const [locateNotice, setLocateNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  // 현재 지도 화면 영역의 가게를 불러와 마커를 다시 그린다.
+  const refreshVisibleStores = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) return;
 
-    async function fetchStores() {
-      setLoading(true);
-      setError(false);
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("stores")
-        .select(
-          "id, name, category, address, latitude, longitude, menu_name, price, phone, pig_temperature",
-        )
-        .not("latitude", "is", null)
-        .not("longitude", "is", null);
+    const nonce = ++fetchNonceRef.current;
+    setError(false);
 
-      if (cancelled) return;
-      if (error) setError(true);
-      else setStores(data ?? []);
-      setLoading(false);
+    const bounds = map.getBounds();
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+
+    const supabase = createClient();
+    let query = supabase
+      .from("stores")
+      .select("id, name, category, latitude, longitude, pig_temperature")
+      .gte("latitude", sw.getLat())
+      .lte("latitude", ne.getLat())
+      .gte("longitude", sw.getLng())
+      .lte("longitude", ne.getLng())
+      .not("latitude", "is", null)
+      .not("longitude", "is", null)
+      .order("pig_temperature", { ascending: false })
+      .limit(MAX_VISIBLE_MARKERS);
+
+    if (foodOnlyRef.current) {
+      query = query.in("category", FOOD_CATEGORIES);
     }
 
-    fetchStores();
-    return () => {
-      cancelled = true;
-    };
-  }, [fetchNonce]);
+    const { data, error: fetchError } = await query;
 
-  // "내 위치" 버튼 — 권한 거부/미지원/서비스 지역 밖이어도 앱이 멈추지 않게 안내만 띄운다.
+    // 더 새로운 요청이 이미 나갔으면 이 결과는 버린다
+    if (nonce !== fetchNonceRef.current || !mapRef.current) return;
+
+    if (fetchError) {
+      setError(true);
+      setLoading(false);
+      return;
+    }
+
+    overlaysRef.current.forEach((overlay) => overlay.setMap(null));
+    overlaysRef.current = [];
+
+    for (const store of (data ?? []) as MapStore[]) {
+      const position = new window.kakao.maps.LatLng(store.latitude, store.longitude);
+      const stage = getPigStage(store.pig_temperature);
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className =
+        "flex -translate-y-1/2 flex-col items-center gap-0.5 rounded-full border border-black/5 bg-white/95 px-2 py-1 shadow-md";
+      el.innerHTML = `
+        <span class="${stage.emojiSizeClass} leading-none">${stage.emoji}</span>
+        <span class="whitespace-nowrap text-[10px] font-semibold text-gray-700">${store.name}</span>
+      `;
+      el.addEventListener("click", () => router.push(`/store/${store.id}`));
+
+      const overlay = new window.kakao.maps.CustomOverlay({
+        position,
+        content: el,
+        yAnchor: 1,
+      });
+      overlay.setMap(map);
+      overlaysRef.current.push(overlay);
+    }
+
+    setLoading(false);
+  }, [router]);
+
+  // 최초 진입: 위치 권한이 있으면 내 주변, 없으면 사당역 기준으로 지도를 만든다.
+  useEffect(() => {
+    if (!sdkReady || !mapContainerRef.current || mapRef.current) return;
+
+    function createMap(center: { lat: number; lng: number }, level: number) {
+      window.kakao.maps.load(() => {
+        if (!mapContainerRef.current || mapRef.current) return;
+        const map = new window.kakao.maps.Map(mapContainerRef.current, {
+          center: new window.kakao.maps.LatLng(center.lat, center.lng),
+          level,
+        });
+        mapRef.current = map;
+
+        let debounce: ReturnType<typeof setTimeout> | null = null;
+        window.kakao.maps.event.addListener(map, "idle", () => {
+          if (debounce) clearTimeout(debounce);
+          debounce = setTimeout(refreshVisibleStores, 250);
+        });
+
+        refreshVisibleStores();
+      });
+    }
+
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => createMap({ lat: pos.coords.latitude, lng: pos.coords.longitude }, 5),
+        () => createMap(DEFAULT_MAP_CENTER, 6),
+        { timeout: 3000 },
+      );
+    } else {
+      createMap(DEFAULT_MAP_CENTER, 6);
+    }
+  }, [sdkReady, refreshVisibleStores]);
+
+  // 🐽 음식점만 보기 토글
+  function toggleFoodOnly() {
+    const next = !foodOnly;
+    setFoodOnly(next);
+    foodOnlyRef.current = next;
+    setLocateNotice(next ? "🐽 음식점만 보여드려요!" : "전체 가게를 보여드려요");
+    refreshVisibleStores();
+  }
+
+  // "내 위치" 버튼 — 권한 거부/미지원이어도 앱이 멈추지 않게 안내만 띄운다.
   function handleLocate() {
     const map = mapRef.current;
     if (!map) return;
@@ -87,56 +184,6 @@ export default function StoreMap() {
     return () => clearTimeout(t);
   }, [locateNotice]);
 
-  useEffect(() => {
-    if (!sdkReady || !mapContainerRef.current || mapRef.current) return;
-
-    window.kakao.maps.load(() => {
-      if (!mapContainerRef.current) return;
-      mapRef.current = new window.kakao.maps.Map(mapContainerRef.current, {
-        center: new window.kakao.maps.LatLng(DEFAULT_MAP_CENTER.lat, DEFAULT_MAP_CENTER.lng),
-        level: 6,
-      });
-    });
-  }, [sdkReady]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || stores.length === 0) return;
-
-    overlaysRef.current.forEach((overlay) => overlay.setMap(null));
-    overlaysRef.current = [];
-
-    const bounds = new window.kakao.maps.LatLngBounds();
-
-    stores.forEach((store) => {
-      if (store.latitude == null || store.longitude == null) return;
-
-      const position = new window.kakao.maps.LatLng(store.latitude, store.longitude);
-      bounds.extend(position);
-
-      const stage = getPigStage(store.pig_temperature);
-      const el = document.createElement("button");
-      el.type = "button";
-      el.className =
-        "flex -translate-y-1/2 flex-col items-center gap-0.5 rounded-full border border-black/5 bg-white/95 px-2 py-1 shadow-md";
-      el.innerHTML = `
-        <span class="${stage.emojiSizeClass} leading-none">${stage.emoji}</span>
-        <span class="whitespace-nowrap text-[10px] font-semibold text-gray-700">${store.name}</span>
-      `;
-      el.addEventListener("click", () => router.push(`/store/${store.id}`));
-
-      const overlay = new window.kakao.maps.CustomOverlay({
-        position,
-        content: el,
-        yAnchor: 1,
-      });
-      overlay.setMap(map);
-      overlaysRef.current.push(overlay);
-    });
-
-    map.setBounds(bounds);
-  }, [stores, router]);
-
   return (
     <div className="relative h-dvh w-full overflow-hidden">
       <Script
@@ -154,6 +201,19 @@ export default function StoreMap() {
       >
         ⓘ
       </Link>
+
+      {/* 🐽 음식점만 보기 토글 */}
+      <button
+        type="button"
+        onClick={toggleFoodOnly}
+        aria-label="음식점만 보기"
+        aria-pressed={foodOnly}
+        className={`absolute bottom-[9.5rem] right-4 z-10 flex h-11 w-11 items-center justify-center rounded-full text-xl shadow-md transition-colors ${
+          foodOnly ? "bg-orange-500 ring-2 ring-orange-300" : "bg-white/95"
+        }`}
+      >
+        🐽
+      </button>
 
       <button
         type="button"
@@ -187,7 +247,7 @@ export default function StoreMap() {
           <p className="text-sm text-gray-600">꿀꿀... 잠시 후 다시 시도해주세요</p>
           <button
             type="button"
-            onClick={() => setFetchNonce((n) => n + 1)}
+            onClick={refreshVisibleStores}
             className="rounded-full bg-orange-500 px-5 py-2 text-sm font-bold text-white"
           >
             다시 시도

@@ -43,7 +43,7 @@ const FORCE = args.includes("--force"); // 이미 동기화된 가게도 다시 
 const limitFlag = args.indexOf("--limit");
 const LIMIT = limitFlag >= 0 ? parseInt(args[limitFlag + 1], 10) : Infinity;
 
-const REQUEST_DELAY_MS = 250; // 카카오 호출 간 예의상 간격
+const CONCURRENCY = 4; // 병렬 워커 수 (전국 1.2만 건 처리용 — 요청 자체 지연이 간격 역할)
 const MIN_REVIEWS_FOR_SUMMARY = 2; // 후기가 이보다 적으면 AI 요약은 건너뜀
 const MATCH_MAX_DISTANCE_M = 150; // place_id 매칭 시 좌표 허용 오차
 
@@ -220,28 +220,36 @@ async function main() {
   const targets = stores.slice(0, LIMIT);
   console.log(`[kakao-seed] 대상 ${targets.length}건 (전체 미동기화 ${stores.length}건)`);
 
-  const stats = { matched: 0, noMatch: 0, summarized: 0, updated: 0 };
+  const stats = { matched: 0, noMatch: 0, summarized: 0, updated: 0, done: 0 };
 
-  for (let i = 0; i < targets.length; i++) {
-    const store = targets[i];
-    const tag = `(${i + 1}/${targets.length}) ${store.name}`;
+  async function processStore(store, index) {
+    const tag = `(${index + 1}/${targets.length}) ${store.name}`;
 
     try {
       const placeId = await matchPlaceId(store);
-      await sleep(REQUEST_DELAY_MS);
 
       if (!placeId) {
         stats.noMatch++;
-        console.log(`  ✗ ${tag} — 카카오 장소 매칭 실패`);
-        continue;
+        // 미매칭도 synced_at을 기록해 재실행 시 다시 시도하지 않게 한다
+        if (!DRY_RUN) {
+          await supabase
+            .from("stores")
+            .update({ kakao_synced_at: new Date().toISOString() })
+            .eq("id", store.id);
+        }
+        return;
       }
       stats.matched++;
 
       const rev = await fetchKakaoReviewData(placeId);
-      await sleep(REQUEST_DELAY_MS);
       if (!rev) {
-        console.log(`  ⚠ ${tag} — place_id ${placeId} 리뷰 데이터 없음`);
-        continue;
+        if (!DRY_RUN) {
+          await supabase
+            .from("stores")
+            .update({ kakao_place_id: placeId, kakao_synced_at: new Date().toISOString() })
+            .eq("id", store.id);
+        }
+        return;
       }
 
       let summary = null;
@@ -259,24 +267,38 @@ async function main() {
         kakao_synced_at: new Date().toISOString(),
       };
 
-      console.log(
-        `  ✓ ${tag} — ★${rev.rating ?? "?"} 리뷰${rev.reviewCount ?? "?"} [${rev.strengths.join(
-          "/",
-        )}]${summary ? "\n      " + summary.replace(/\n/g, " / ") : ""}`,
-      );
-
-      if (!DRY_RUN) {
-        const { error: upErr } = await supabase
-          .from("stores")
-          .update(patch)
-          .eq("id", store.id);
-        if (upErr) console.log(`      ! 업데이트 실패: ${upErr.message}`);
+      if (DRY_RUN) {
+        console.log(
+          `  ✓ ${tag} — ★${rev.rating ?? "?"} 리뷰${rev.reviewCount ?? "?"} [${rev.strengths.join("/")}]${
+            summary ? "\n      " + summary.replace(/\n/g, " / ") : ""
+          }`,
+        );
+      } else {
+        const { error: upErr } = await supabase.from("stores").update(patch).eq("id", store.id);
+        if (upErr) console.log(`  ! ${tag} 업데이트 실패: ${upErr.message}`);
         else stats.updated++;
       }
     } catch (e) {
       console.log(`  ! ${tag} — 예외: ${String(e).slice(0, 160)}`);
+    } finally {
+      stats.done++;
+      if (stats.done % 100 === 0) {
+        console.log(
+          `[kakao-seed] 진행 ${stats.done}/${targets.length} — 매칭 ${stats.matched} / 요약 ${stats.summarized} / 반영 ${stats.updated}`,
+        );
+      }
     }
   }
+
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const index = cursor++;
+      await processStore(targets[index], index);
+      await sleep(50); // 카카오/AI에 과하지 않게 살짝 간격
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
   console.log(
     `[kakao-seed] 완료 — 매칭 ${stats.matched} / 매칭실패 ${stats.noMatch} / 요약 ${stats.summarized} / DB반영 ${stats.updated}`,

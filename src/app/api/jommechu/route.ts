@@ -3,7 +3,7 @@ import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { createAnthropicClient } from "@/lib/anthropic";
 import { createClient } from "@/lib/supabase/server";
-import { haversineDistanceMeters } from "@/lib/geo";
+import { boundingBox, haversineDistanceMeters } from "@/lib/geo";
 import { getClientIp, rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 const SEARCH_RADIUS_METERS = 2000;
@@ -130,21 +130,32 @@ export async function POST(request: Request) {
 
   const supabase = createClient();
 
-  // 전체 가게(수백 건 규모)를 받아 거리순 정렬 — 반경 밖 "가장 가까운 짜장면집" 안내까지 하려면
-  // 바운딩 박스로 자르지 않고 전량을 보는 게 단순하고 정확하다.
-  const { data: allStores, error: storesError } = await supabase
-    .from("stores")
-    .select(
-      "id, name, category, menu_name, price, pig_temperature, ai_summary, kakao_summary, kakao_strengths, kakao_rating, latitude, longitude",
-    )
-    .not("latitude", "is", null)
-    .not("longitude", "is", null);
+  // 전국 1.2만 가게를 전부 받을 수는 없으니 바운딩 박스를 10km → 50km로 넓혀가며 찾는다.
+  // (10km면 도시 지역은 충분하고, 시골에서도 50km 안엔 대부분 착한가게가 있다)
+  let fetched: StoreRow[] = [];
+  for (const radius of [10_000, 50_000]) {
+    const box = boundingBox(lat, lng, radius);
+    const { data, error: storesError } = await supabase
+      .from("stores")
+      .select(
+        "id, name, category, menu_name, price, pig_temperature, ai_summary, kakao_summary, kakao_strengths, kakao_rating, latitude, longitude",
+      )
+      .gte("latitude", box.minLat)
+      .lte("latitude", box.maxLat)
+      .gte("longitude", box.minLng)
+      .lte("longitude", box.maxLng)
+      .not("latitude", "is", null)
+      .not("longitude", "is", null)
+      .limit(1000);
 
-  if (storesError) {
-    return NextResponse.json({ error: storesError.message }, { status: 500 });
+    if (storesError) {
+      return NextResponse.json({ error: storesError.message }, { status: 500 });
+    }
+    fetched = (data as StoreRow[]) ?? [];
+    if (fetched.length > 0) break;
   }
 
-  const sorted: StoreWithDistance[] = ((allStores as StoreRow[]) ?? [])
+  const sorted: StoreWithDistance[] = fetched
     .map((store) => ({
       ...store,
       distanceMeters: haversineDistanceMeters(lat, lng, store.latitude, store.longitude),
@@ -154,7 +165,7 @@ export async function POST(request: Request) {
   if (sorted.length === 0) {
     return NextResponse.json({
       noResult: true,
-      message: "아직 등록된 착한가격업소가 없어요.",
+      message: "반경 50km 안에 등록된 착한가격업소가 없어요. 🐷",
     });
   }
 
