@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import { getPigStage } from "@/lib/pig-stage";
 import { DEFAULT_MAP_CENTER, FOOD_CATEGORIES } from "@/lib/constants";
 import JommechuSheet from "./JommechuSheet";
+import NearbyListSheet from "./NearbyListSheet";
 
 const KAKAO_JS_KEY = process.env.NEXT_PUBLIC_KAKAO_JS_KEY;
 
@@ -208,7 +209,7 @@ export default function StoreMap() {
         onClick={toggleFoodOnly}
         aria-label="음식점만 보기"
         aria-pressed={foodOnly}
-        className={`absolute bottom-[9.5rem] right-4 z-10 flex h-11 w-11 items-center justify-center rounded-full text-xl shadow-md transition-colors ${
+        className={`absolute bottom-[11.5rem] right-4 z-10 flex h-11 w-11 items-center justify-center rounded-full text-xl shadow-md transition-colors ${
           foodOnly ? "bg-orange-500 ring-2 ring-orange-300" : "bg-white/95"
         }`}
       >
@@ -219,7 +220,7 @@ export default function StoreMap() {
         type="button"
         onClick={handleLocate}
         aria-label="내 위치로 이동"
-        className="absolute bottom-24 right-4 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-lg shadow-md"
+        className="absolute bottom-32 right-4 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-lg shadow-md"
       >
         {locating ? (
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
@@ -254,6 +255,8 @@ export default function StoreMap() {
           </button>
         </div>
       )}
+
+      <NearbyListSheet foodOnly={foodOnly} />
 
       <JommechuSheet />
     </div>
