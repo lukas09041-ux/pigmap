@@ -48,7 +48,7 @@ const MIN_REVIEWS_FOR_SUMMARY = 2; // 후기가 이보다 적으면 AI 요약은
 const MATCH_MAX_DISTANCE_M = 150; // place_id 매칭 시 좌표 허용 오차
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY, timeout: 30_000, maxRetries: 1 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -70,7 +70,8 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 }
 
 // 카카오 Local 키워드 검색 → 좌표까지 비교해 가장 그럴듯한 place_id 반환
-async function matchPlaceId(store) {
+// 응답이 안 오는 요청에 워커가 영원히 매달리지 않도록 15초 타임아웃 + 재시도 상한을 둔다.
+async function matchPlaceId(store, retries = 3) {
   const dong = extractDong(store.address || "");
   const query = `${dong} ${store.name}`.trim();
   const url = new URL("https://dapi.kakao.com/v2/local/search/keyword.json");
@@ -79,10 +80,11 @@ async function matchPlaceId(store) {
 
   const res = await fetch(url, {
     headers: { Authorization: `KakaoAK ${KAKAO_REST_KEY}` },
+    signal: AbortSignal.timeout(15_000),
   });
-  if (res.status === 429) {
-    await sleep(1000);
-    return matchPlaceId(store);
+  if (res.status === 429 && retries > 0) {
+    await sleep(1500);
+    return matchPlaceId(store, retries - 1);
   }
   if (!res.ok) return null;
 
@@ -120,6 +122,7 @@ async function fetchKakaoReviewData(placeId) {
       Referer: "https://place.map.kakao.com/",
       "User-Agent": "Mozilla/5.0",
     },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) return null;
   const j = await res.json();
