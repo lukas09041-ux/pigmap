@@ -181,6 +181,21 @@ ${reviewTexts.map((t, i) => `${i + 1}. ${t}`).join("\n")}`,
   return `${p.line1}\n${p.line2}\n${p.line3}`;
 }
 
+// Supabase 조회는 기본 1000행 제한이 있으므로, 미동기화 가게를 1000개씩 배치로
+// 반복 처리한다 (미매칭도 synced_at을 찍기 때문에 매 배치마다 대상이 줄어든다).
+async function fetchBatch(batchSize) {
+  let query = supabase
+    .from("stores")
+    .select("id, name, category, address, latitude, longitude")
+    .order("created_at", { ascending: true })
+    .limit(batchSize);
+  if (!FORCE) query = query.is("kakao_synced_at", null);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`stores 조회 실패: ${error.message}`);
+  return data ?? [];
+}
+
 async function main() {
   console.log(
     `[kakao-seed] 시작 ${DRY_RUN ? "(DRY RUN — DB 미기록)" : ""}${
@@ -188,39 +203,29 @@ async function main() {
     }`,
   );
 
-  let stores;
-  {
-    let query = supabase
-      .from("stores")
-      .select("id, name, category, address, latitude, longitude, kakao_synced_at")
-      .order("created_at", { ascending: true });
-    if (!FORCE) query = query.is("kakao_synced_at", null);
+  const grand = { matched: 0, noMatch: 0, summarized: 0, updated: 0, done: 0 };
+  let remaining = LIMIT;
 
-    const { data, error } = await query;
-    if (error) {
-      // 마이그레이션 004 미적용 상태 — 컬럼 없이 조회 (dry-run 미리보기 용도)
-      if (/kakao_/.test(error.message)) {
-        console.warn(
-          "[kakao-seed] 카카오 컬럼이 아직 없습니다. 마이그레이션 004를 적용하세요. 지금은 컬럼 없이 조회합니다(DB 반영 불가).",
-        );
-        const { data: d2, error: e2 } = await supabase
-          .from("stores")
-          .select("id, name, category, address, latitude, longitude")
-          .order("created_at", { ascending: true });
-        if (e2) throw new Error(`stores 조회 실패: ${e2.message}`);
-        stores = d2;
-      } else {
-        throw new Error(`stores 조회 실패: ${error.message}`);
-      }
-    } else {
-      stores = data;
-    }
+  while (remaining > 0) {
+    const targets = await fetchBatch(Math.min(1000, remaining));
+    if (targets.length === 0) break;
+    remaining -= targets.length;
+
+    await processBatch(targets, grand);
+    console.log(
+      `[kakao-seed] 배치 완료 — 누적 ${grand.done}건 (매칭 ${grand.matched} / 요약 ${grand.summarized} / 반영 ${grand.updated})`,
+    );
+
+    // DRY_RUN/FORCE는 synced_at이 안 찍혀 같은 행을 또 잡으므로 1배치만 돌고 끝낸다
+    if (DRY_RUN || FORCE) break;
   }
 
-  const targets = stores.slice(0, LIMIT);
-  console.log(`[kakao-seed] 대상 ${targets.length}건 (전체 미동기화 ${stores.length}건)`);
+  console.log(
+    `[kakao-seed] 전체 완료 — 매칭 ${grand.matched} / 매칭실패 ${grand.noMatch} / 요약 ${grand.summarized} / DB반영 ${grand.updated}`,
+  );
+}
 
-  const stats = { matched: 0, noMatch: 0, summarized: 0, updated: 0, done: 0 };
+async function processBatch(targets, stats) {
 
   async function processStore(store, index) {
     const tag = `(${index + 1}/${targets.length}) ${store.name}`;
@@ -299,10 +304,6 @@ async function main() {
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
-
-  console.log(
-    `[kakao-seed] 완료 — 매칭 ${stats.matched} / 매칭실패 ${stats.noMatch} / 요약 ${stats.summarized} / DB반영 ${stats.updated}`,
-  );
 }
 
 main().catch((err) => {
