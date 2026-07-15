@@ -76,14 +76,16 @@ export function getNextPigLevel(certCount: number): PigLevel | null {
 // 나중에 실제 이미지 파일로 교체하려면 아래에 경로만 넣으면 된다.
 // (예: "/pig/body-lv2.png") — 경로가 null이면 코드로 그린 SVG placeholder를 렌더링한다.
 // 이미지는 정사각형·투명 배경 기준이며 레이어 순서는 몸통 → 아이템 순으로 겹쳐진다.
+// 현재는 모든 레벨이 같은 3D 캐릭터를 쓴다. 레벨별 디자인이 준비되면
+// "/pig/body-lv3.png"처럼 개별 경로로 바꾸면 된다.
 export const PIG_BODY_ASSETS: Record<number, string | null> = {
-  0: null,
-  1: null,
-  2: null,
-  3: null,
-  4: null,
-  5: null,
-  6: null,
+  0: "/pig/pig-body.png",
+  1: "/pig/pig-body.png",
+  2: "/pig/pig-body.png",
+  3: "/pig/pig-body.png",
+  4: "/pig/pig-body.png",
+  5: "/pig/pig-body.png",
+  6: "/pig/pig-body.png",
 };
 
 export const PIG_ITEM_ASSETS: Record<PigItemId, string | null> = {
